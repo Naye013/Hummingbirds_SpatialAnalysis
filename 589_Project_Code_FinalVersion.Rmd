@@ -1,0 +1,804 @@
+---
+title: "DATA 589 Project"
+author: "Andrew Sarracini, Eden Chan, Nayeli Montiel"
+date: "`r format(Sys.time(), '%d %B, %Y %H:%M:%OS')`"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+# DO NOT ALTER CODE IN THIS CHUNK
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Data Loading
+
+```{r}
+# Libraries
+library(sf)
+library(sp)
+library(spatstat)
+ 
+# Load the spatial covariates
+load("BC_Covariates.Rda")
+
+# --- Species Data ---
+# Set the file path to read occurrences from Anna's Hummingbirds
+file_path <- "0158178-240321170329656/occurrence.txt"
+
+# Read the entire dataset into a data frame
+data <- read.delim(file_path, stringsAsFactors = FALSE)
+
+# Print the dimension of the data frame
+dim(data)
+
+```
+
+### Data pre-processing 
+
+```{r}
+# Filtering the data by province 
+data_bc<- subset(data, stateProvince == "British Columbia")
+
+#Filtering the data by year
+data_bc<-data_bc[data_bc$year == 2024,]
+
+# Selecting the latitude and longitude
+clean_data <- data_bc[complete.cases(data_bc$decimalLatitude, data_bc$decimalLongitude), ]
+
+# BC Albers projection
+projection_string <- "+proj=aea +lat_0=45 +lon_0=-126 +lat_1=50 +lat_2=58.5 +x_0=1000000 +y_0=0 +datum=NAD83 +units=m +no_defs"
+
+# Create an sf object with your latitude and longitude coordinates
+sf_data <- st_as_sf(clean_data, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+
+# Transform the coordinates to BC Albers projection
+sf_data_bc_albers <- st_transform(sf_data, projection_string)
+
+# Extract the transformed coordinates
+transformed_latitude <- st_coordinates(sf_data_bc_albers)[, 2]
+transformed_longitude <- st_coordinates(sf_data_bc_albers)[, 1]
+
+# Print the transformed coordinates
+head(transformed_latitude)
+head(transformed_longitude)
+```
+
+### Making a ppp object
+
+```{r}
+humm_ppp <- ppp(x = transformed_longitude, 
+                y = transformed_latitude,
+                window = as.owin(st_as_sf(DATA$Window)))
+
+# Removing duplicates 
+duplicated_points <- duplicated(humm_ppp)
+
+humm_ppp <- humm_ppp[!duplicated_points]
+humm_ppp 
+
+# Visualising ppp object 
+plot(humm_ppp,     
+     pch = 9,
+     cols = "#046C9A",
+     main = "ppp_object")
+
+```
+
+### Quadrat count and homogeneity test
+
+```{r}
+#Split into a 2 by 10 quadrat and count points
+Q <- quadratcount(humm_ppp,
+                  nx=2,
+                  ny=10)
+sum(Q)
+
+# Homogeneity test 
+quadrat.test(Q)
+
+# Plot the output 
+plot(humm_ppp,
+     pch = 16,
+     cex = 0.5,
+     cols = "#046C9A",
+     main = "Humming birds Quadrat Counts in BC")
+
+plot(Q, cex = 1, col = "red", add = T) 
+```
+
+### First Moment
+
+```{r}
+# Visualize intensity
+plot(intensity(Q, image = T),
+     main = "Hummingbirds Intensity")
+
+# Add points 
+plot(humm_ppp,
+     pch = 16,
+     cex = 0.4,
+     cols = "black",
+     add = T)
+```
+
+### Kernel-estimate
+
+```{r}
+# Density estimation of lambda(u)
+plot(density(humm_ppp),
+     ribbon = F,
+     main = "Kernel Esimate with Likelihood Cross Validation Bandwidth")
+
+plot(humm_ppp,
+     pch = 16,
+     cex = 0.4,
+     cols = "white",
+     add = T)
+
+plot(humm_ppp,
+     pch = 16,
+     cex = 0.2,
+     cols = "black",
+     add = T)
+```
+
+### Hot-spot analisys
+
+```{r}
+
+# Estimate R
+R <- bw.ppl(humm_ppp)
+
+# Calculate test statistic
+LR <- scanLRTS(humm_ppp, r = R)
+
+# Plot the output 
+plot(LR, main="Hotspot Analysis")
+
+plot(DATA$Window,
+     border = "gray60", 
+     add=T)
+
+#Add the points
+plot(humm_ppp,
+     pch = 16,
+     cex = 0.8,
+     cols = "white",
+     add = T)
+
+plot(humm_ppp,
+     pch = 16,
+     cex = 0.5,
+     cols = "black",
+     add = T)
+
+#Compute local p-values
+pvals <- eval.im(pchisq(LR,
+                        df = 1,
+                        lower.tail = FALSE))
+
+
+#Plot the output
+plot(pvals, main = "Local p-values")
+
+
+```
+
+## Second Moment
+
+### Inhomogenous K function
+
+```{r}
+
+#Estimate a strictly positive density
+lambda_humm_pos <- density(humm_ppp,
+                          sigma=bw.ppl,
+                          positive=TRUE)
+
+#Simulation envelope (with points drawn from the estimated intensity)
+E_humm_inhom <- envelope(humm_ppp,
+                        Kinhom,
+                        simulate = expression(rpoispp(lambda_humm_pos)),
+                        correction="border",
+                        rank = 1,
+                        nsim = 99,
+                        fix.n = TRUE)
+
+
+```
+
+```{r}
+# Zoom-in Ripley's K
+plot(E_humm_inhom,
+     xlim = c(0,20000),
+     main = "Inhomogenous Ripley's K (Zoomed)",
+     lwd = 2)
+
+```
+
+When accounting for inhomogeneity, it's clear that there is correlation between the points in the 0-6000m range. This is fairly concrete proof that the points representing the hummingbirds are clustered together in this range. 
+
+### Inhomogenous pair correlation function
+
+```{r}
+
+# Inhomogenous pcf
+pcf_humm_inhom <- envelope(humm_ppp,
+                          pcfinhom,
+                          simulate = expression(rpoispp(lambda_humm_pos)),
+                          rank = 1,
+                          nsim = 99,
+                          fix.n = TRUE)
+
+plot(pcf_humm_inhom) 
+
+```
+
+
+## Model
+
+### Rho -- Elevation
+
+```{r}
+#Estimate Rho
+rho_elev <- rhohat(humm_ppp, DATA$Elevation)
+plot(rho_elev, main="rho Elevation", xlab = "Elevation", xlim =c(0, max(DATA$Elevation)))
+
+```
+
+```{r}
+# Zoom rho elevation
+plot(rho_elev, main="rho Elevation", xlab = "Elevation", xlim =c(0, 500))
+```
+
+### Rho -- Forest
+
+```{r}
+#Estimate Rho
+rho_forest <- rhohat(humm_ppp, DATA$Forest)
+
+plot(rho_forest,
+     main="rho Forest",
+     xlab = "Forest",
+     xlim = c(0, max(as.vector(DATA$Forest))))
+
+```
+
+### Rho -- HFI 
+
+```{r}
+
+#Estimate Rho Human Footprint Index (HFI) 
+rho_hfi <- rhohat(humm_ppp, DATA$HFI)
+
+plot(rho_hfi,
+     main="rho Human Footprint Index",
+     xlab = "HFI",
+     xlim = c(0, max(as.vector(DATA$HFI))))
+
+```
+
+### Rho -- Distance to Water
+
+```{r}
+
+#Estimate Rho Distance to Water
+rho <- rhohat(humm_ppp, DATA$Dist_Water)
+
+plot(rho,
+     main="rho Distance to Water",
+     xlab = "Distance to Water",
+     xlim = c(0, max(as.vector(DATA$Dist_Water))))
+
+```
+
+### Hummingbird vs BC Elevation -- Median values
+
+```{r}
+
+# Finding median elevation
+BC_elev <- median(DATA$Elevation) 
+cat("BC Elevation:", BC_elev, "\n")
+
+humm_elev <- median(DATA$Elevation[humm_ppp])
+cat("Hummingbird Elevation:", humm_elev)
+
+# KDE of elevation values within the province
+bc_elev_kde <- density(as.numeric(DATA$Elevation))
+
+# KDE of elevation values for hummingbirds
+humm_elev_kde <- density(as.numeric(DATA$Elevation[humm_ppp]))
+
+```
+
+### Hummingbird vs BC Elevation -- KDE
+
+```{r}
+
+# Calculate the maximum value of KDEs
+max_elev <- max(max(bc_elev_kde$y), max(humm_elev_kde$y))
+
+# Plot with adjusted y-axis limits
+plot(bc_elev_kde, main="Overlayed BC and Hummingbird Elevations", ylim = c(0, max_elev))
+
+# lines(parks_elev_kde, col=c("red", "blue")) 
+
+polygon(bc_elev_kde, col = rgb(0, 0, 1, alpha = 0.2))
+polygon(humm_elev_kde, col = rgb(1, 0, 0, alpha = 0.2))
+
+legend("topright", legend=c("BC Elevations", "Hummingbird Elevations"), col= c(rgb(0, 0, 1, alpha = 0.5), rgb(1, 0, 0, alpha = 0.5)), lty=1, bty="n")
+
+```
+
+### Hummingbird vs BC Elevation -- Barplot counts
+
+```{r}
+
+plot(cut(as.numeric(DATA$Elevation[humm_ppp]), 
+         5, 
+         labels = c("very low", "low", "medium", "high", "very high")), 
+     main = "Elevation Classes") 
+
+points(transformed_longitude, transformed_latitude, pch=20, col='white' )
+points(transformed_longitude, transformed_latitude, pch=20, col='black')
+
+
+hist(cut(DATA$Elevation,
+         5, 
+         labels = c("very low", "low", "medium", "high", "very high")), 
+     main = "Distribution of Elevation Classes")
+
+
+```
+
+### Hummingbird vs BC Forest -- Median values
+
+```{r}
+
+# Finding median elevation
+BC_forest <- median(DATA$Forest) 
+cat("BC Forest median value:", BC_forest, "\n")
+
+humm_forest <- median(DATA$Forest[humm_ppp])
+cat("Hummingbird Forest median value:", humm_forest)
+
+# KDE of forest values within the province
+bc_forest_kde <- density(as.numeric(DATA$Forest))
+
+# KDE of elevation values for humming birds
+humm_forest_kde <- density(as.numeric(DATA$Forest[humm_ppp]))
+
+```
+
+### Hummingbird vs BC Forest Cover -- Barplot counts
+
+```{r}
+plot(cut(as.numeric(DATA$Forest[humm_ppp]), 
+         5, 
+         labels = c("very low", "low", "medium", "high", "very high")), 
+     main = "Forest Classes") 
+```
+
+### Hummingbird vs BC Forest Cover -- KDE
+
+```{r}
+# Calculate the maximum value of KDEs
+max_forest <- max(max(bc_forest_kde$y), max(humm_forest_kde$y))
+
+# Plot with adjusted y-axis limits
+plot(bc_forest_kde, main="Overlayed BC and Hummingbird Forest", ylim = c(0, max_forest))
+
+
+polygon(bc_forest_kde, col = rgb(0, 0, 1, alpha = 0.2))
+polygon(humm_forest_kde, col = rgb(1, 0, 0, alpha = 0.2))
+
+legend("topright", legend=c("BC Forests", "Hummingbird Forests"), col= c(rgb(0, 0, 1, alpha = 0.5), rgb(1, 0, 0, alpha = 0.5)), lty=1, bty="n")
+```
+
+## Hummingbird vs BC HFI -- Median values
+
+```{r}
+
+# Finding median elevation
+BC_HFI <- median(DATA$HFI) 
+cat("BC HFI median value:", BC_HFI, "\n")
+
+humm_HFI <- median(DATA$HFI[humm_ppp])
+cat("Hummingbird HFI median value:", humm_HFI)
+
+# KDE of forest values within the province
+bc_HFI_kde <- density(as.numeric(DATA$HFI))
+# plot(bc_elev_kde, main="BC Elevation KDE")
+
+
+# KDE of elevation values for humming birds
+humm_HFI_kde <- density(as.numeric(DATA$HFI[humm_ppp]))
+# plot(humm_elev_kde, main="Hummingbird Elevation KDE")
+
+```
+
+## Hummingbird vs BC HFI -- KDE
+
+```{r}
+
+# Calculate the maximum value of KDEs
+max_HFI <- max(max(bc_HFI_kde$y), max(humm_HFI_kde$y))
+
+# Plot with adjusted y-axis limits
+plot(bc_HFI_kde, main="Overlayed BC and Hummingbird HFI", ylim = c(0, max_HFI))
+
+# lines(parks_elev_kde, col=c("red", "blue")) 
+
+polygon(bc_HFI_kde, col = rgb(0, 0, 1, alpha = 0.2))
+polygon(humm_HFI_kde, col = rgb(1, 0, 0, alpha = 0.2))
+
+legend("topright", legend=c("BC HFI", "Hummingbird HFI"), col= c(rgb(0, 0, 1, alpha = 0.5), rgb(1, 0, 0, alpha = 0.5)), lty=1, bty="n")
+
+```
+
+# Hummingbird vs BC water -- Median values
+
+```{r}
+
+# Finding median elevation
+BC_water <- median(DATA$Dist_Water) 
+cat("BC Distance to water median value:", BC_water, "\n")
+
+humm_water <- median(DATA$Dist_Water[humm_ppp])
+cat("Hummingbird Distance to Water median value:", humm_water)
+
+# KDE of forest values within the province
+bc_water_kde <- density(as.numeric(DATA$Dist_Water))
+# plot(bc_elev_kde, main="BC Elevation KDE")
+
+
+# KDE of elevation values for humming birds
+humm_water_kde <- density(as.numeric(DATA$Dist_Water[humm_ppp]))
+# plot(humm_elev_kde, main="Hummingbird Elevation KDE")
+
+```
+
+# Hummingbird vs BC water -- KDE
+
+```{r}
+
+# Calculate the maximum value of KDEs
+max_water <- max(max(bc_water_kde$y), max(humm_water_kde$y))
+
+# Plot with adjusted y-axis limits
+plot(bc_water_kde, main="Overlayed BC and Hummingbird Distance to Water", ylim = c(0, max_water))
+
+# lines(parks_elev_kde, col=c("red", "blue")) 
+
+polygon(bc_water_kde, col = rgb(0, 0, 1, alpha = 0.2))
+polygon(humm_water_kde, col = rgb(1, 0, 0, alpha = 0.2))
+
+legend("topright", legend=c("BC Distance to Water", "Hummingbird Distance to Water"), col= c(rgb(0, 0, 1, alpha = 0.5), rgb(1, 0, 0, alpha = 0.5)), lty=1, bty="n")
+
+```
+
+**Analysis rho function:**               
+
+The figures of the rho function vs our covariates (elevation, forest cover, human foot print index and distance to water) suggest that there is likely to be a relationship with our response variable the number of hummingbirds in BC.            
+
+- Elevation exhibits a negative relationship with intensity, particularly noticeable up to elevations of 25m, indicating a decrease in the number of hummingbirds as elevation increases.          
+
+- Forest cover displays a right-skewed distribution, with intensity increasing up to 10% forest cover and decreasing thereafter.           
+
+- Distance to water demonstrates a downward trend, with the highest concentration of birds observed within 0 to 5000m of water.          
+
+- HFI exhibits a positive relationship with intensity, most clearly observed at extreme HFI values. However, with a higher HFI, there are fewer samples available to support accurate estimates.       
+
+### Check for collinearity between covariates
+
+```{r}
+# Correlation between variables
+cor.im(DATA$Elevation, DATA$Forest, DATA$HFI, DATA$Dist_Water, use="pairwise.complete.obs")
+```
+
+### Baseline - null model
+
+```{r}
+fit_null <- ppm(humm_ppp ~ 1, method="VBlogi")
+fit_null
+```
+
+### Linear Model
+
+As equation shows, we use the log-linear to mimic our data:
+
+$$\lambda_{parks}(u) = e^{\alpha+\beta_{elevation}Elevation(u)+\beta_{forest}Forest(u)+\beta_{HFI}HFI(u)+\beta_{dist.water}DistWater(u)}$$
+
+Due to the normal distribution, the model can not converge so we use the `method="VBlogi"`
+
+```{r}
+DATA$HFI_change <- as.owin(DATA$HFI,na.replace=0)
+Dist_Water <- as.owin(DATA$Dist_Water,na.replace=0)
+fit_linear <- ppm(humm_ppp ~ Elevation + Forest + HFI_change + Dist_Water, data = DATA, method="VBlogi")
+fit_linear
+```
+
+#### Model selection
+
+Because the BVlogit object used in linear models cannot be applied to ANOVA, we employ both AIC and loss ratio to select the model. The results indicate that the linear model outperforms the reduced model.
+
+```{r}
+# AIC values
+cat("AIC for our linear model proposal: ", AIC(fit_linear))
+cat("\nAIC for the intercept only model: ", AIC(fit_null), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_linear) - AIC(fit_null), "\n")
+
+## Use loss ratio
+# install.packages("lmtest")
+library(lmtest)
+lrtest(fit_null, fit_linear)
+```
+
+### Quadratic Model
+
+There are clearly nonlinear relationships between hummingbirds and all four variables. Therefore, we will proceed by fitting a quadratic model first. This warning suggests that the algorithm used for fitting a model did not converge, meaning it did not reach a stable solution. This could happen for various reasons, such as starting with poor initial parameter values, numerical instability, or the model being too complex for the data. 
+
+```{r}
+fit_q1 <- ppm(humm_ppp ~ Elevation + I(Elevation^2) + Forest + I(Forest^2) + HFI_change + I(HFI_change^2) + Dist_Water + I(Dist_Water^2),data=DATA,method="mpl")
+fit_q1
+```
+
+Due to the presence of NA and the unstable process, we think to reduce the parameters of our model.
+
+```{r}
+fit_q2 <- ppm(humm_ppp ~ Elevation + I(Elevation^2),data=DATA,method="VBlogi")
+fit_q2
+fit_q3 <- ppm(humm_ppp ~ Forest + I(Forest^2),data=DATA,method="VBlogi")
+fit_q3
+fit_q4 <- ppm(humm_ppp ~  HFI_change + I(HFI_change^2),data=DATA,method="VBlogi")
+fit_q4
+fit_q5 <- ppm(humm_ppp ~  Dist_Water + I(Dist_Water^2),data=DATA,method="VBlogi")
+fit_q5
+```
+
+#### Model selection
+
+All quadratic elevation, HFI and distance from water models are better than linear one, while forest cover is worse.
+
+```{r}
+# AIC values
+cat("AIC for our linear model proposal: ", AIC(fit_linear))
+cat("\nAIC for quadratic elevation model: ", AIC(fit_q2), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_linear) - AIC(fit_q2), "\n")
+
+## Use loss ratio
+lrtest(fit_linear, fit_q2)
+
+```
+
+```{r}
+# AIC values
+cat("AIC for our linear model proposal: ", AIC(fit_linear))
+cat("\nAIC for quadratic forest model: ", AIC(fit_q3), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_linear) - AIC(fit_q3), "\n")
+
+## Use loss ratio
+lrtest(fit_linear, fit_q3)
+
+```
+
+```{r}
+# AIC values
+cat("AIC for our linear model proposal: ", AIC(fit_linear))
+cat("\nAIC for quadratic HFI model: ", AIC(fit_q4), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_linear) - AIC(fit_q4), "\n")
+
+## Use loss ratio
+lrtest(fit_linear, fit_q4)
+
+```
+
+```{r}
+# AIC values
+cat("AIC for our linear model proposal: ", AIC(fit_linear))
+cat("\nAIC for quadratic distance to water model: ", AIC(fit_q5), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_linear) - AIC(fit_q5), "\n")
+
+## Use loss ratio
+lrtest(fit_linear, fit_q5)
+```
+
+Due to the failure of convergence in the quadratic models with reduced variables, we compared them with the original unconverged model, which includes all quadratic covariates. And the results indicate that the original model performs better, even surpassing the linear model.
+
+```{r}
+fit_qfinal <- ppm(humm_ppp ~ Elevation + I(Elevation^2) + Forest + I(HFI_change^2) + Dist_Water + I(Dist_Water^2),data=DATA,method="mpl")
+fit_qfinal
+```
+
+```{r}
+# AIC values
+cat("AIC for final quadratic model : ", AIC(fit_qfinal))
+cat("\nAIC for origin quadratic model: ", AIC(fit_q1), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_qfinal) - AIC(fit_q1), "\n")
+
+## Use loss ratio
+lrtest(fit_qfinal, fit_q1)
+
+```
+
+```{r}
+# AIC values
+cat("AIC for linear model : ", AIC(fit_linear))
+cat("\nAIC for origin quadratic model: ", AIC(fit_q1), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_linear) - AIC(fit_q1), "\n")
+
+## Use loss ratio
+lrtest(fit_linear, fit_q1)
+```
+
+### GAM Framework: Model fit rho shape and additive modelling framework
+
+```{r}
+library(splines)
+
+fit_rhogam <-ppm(humm_ppp ~  Elevation + I(Elevation^2) + Forest +I(Forest^2)+HFI_change+I(HFI_change^2) + bs(Dist_Water,df=8),data=DATA,use.gam = TRUE)
+fit_rhogam
+```
+
+#### Model selection
+
+- "rhogam" is better than linear model and have similar resule of quadratic model.
+
+```{r}
+# AIC values
+cat("AIC for linear model : ", AIC(fit_linear))
+cat("\nAIC for rhogam model: ", AIC(fit_rhogam), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_linear) - AIC(fit_rhogam), "\n")
+
+## Use loss ratio
+lrtest(fit_linear, fit_rhogam)
+
+```
+
+```{r}
+# AIC values
+cat("AIC for quadratic model : ", AIC(fit_q1))
+cat("\nAIC for rhogam model: ", AIC(fit_rhogam), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_q1) - AIC(fit_rhogam), "\n")
+
+## Use loss ratio
+lrtest(fit_q1, fit_rhogam)
+
+```
+
+### GAM model
+
+Finally, we aimed to explore a more complex model, namely GAM. The results demonstrate that it is the most superior model we have encountered thus far.
+
+```{r}
+fit_gam <-ppm(humm_ppp ~  bs(Elevation,df=3)+ bs(Forest,df=3)+ bs(HFI_change,df=3) + bs(Dist_Water,df=8),data=DATA,use.gam = TRUE)
+fit_gam
+```
+
+#### Model selection
+
+```{r}
+# AIC values
+cat("AIC for gam model : ", AIC(fit_gam))
+cat("\nAIC for rhogam model: ", AIC(fit_rhogam), "\n")
+
+# Delta AIC
+cat("\nDelta AIC: ", AIC(fit_gam) - AIC(fit_rhogam), "\n")
+
+## Use loss ratio
+lrtest(fit_rhogam, fit_gam)
+
+```
+
+## Model evaluation 
+
+### Predict
+
+```{r}
+# Plot the model fitted
+plot(fit_gam,
+     se = FALSE,
+     superimpose = FALSE,
+     main = "Estimated Anna's Hummingbirds intensity")
+
+# Overlay the Parks locations
+points(humm_ppp, pch = 16, cex = 0.6, col = "white")
+points(humm_ppp, pch = 16, cex = 0.5, col = "black")
+
+```
+
+### Q-test
+
+The small p value tells us that there’s a significant deviation from our model’s predictions. While this is useful for suggesting that our model has room for improvement, it provides us with no direction on how to do so (e.g., missing parameters, model mispecification (e.g., polynomial vs. linear), a lack of independence, non-stationarity, etc…).
+
+```{r}
+# Quadrat counting for significant deviations from our intensity function using chi-squared test
+# Performs a goodness-of-fit test of a fitted inhomogeneous Poisson model
+quadrat.test(fit_gam, nx =2 , ny = 10) 
+```
+
+### Residuals plot
+
+```{r}
+#Calculate the residuals
+res <- residuals(fit_gam) 
+
+#Visualise
+plot(res,
+     cols = "transparent",
+     main = "Residuals \n GAM with splines in the four covariates \n(Model 10)", 
+     main.cex = 0.6)
+```
+
+#### Partial residuals
+ 
+```{r}
+#Calculate the partial residuals as a function of Elevation
+par_res_elev <- parres(fit_gam, "Elevation")
+
+#Calculate the relative intensity as a function of Forest cover
+par_res_fc <- parres(fit_gam, "Forest")
+
+#Calculate the relative intensity as a function of Distance from water
+par_res_water <- parres(fit_gam, "Dist_Water")
+
+#Calculate the relative intensity as a function of HFI
+par_res_HFI <- parres(fit_gam, "HFI")
+
+
+#Side by side plotting
+par(mfrow = c(2,2))
+plot(par_res_elev,
+     legend = FALSE,
+     lwd = 2,
+     main = "",
+     xlab = "Elevation (m)")
+plot(par_res_fc,
+     legend = FALSE,
+     lwd = 2,
+     main = "",
+     xlab = "Forest cover (%)")
+plot(par_res_HFI,
+     legend = FALSE,
+     lwd = 2,
+     main = "",
+     xlab = "Human Footprint Index")
+plot(par_res_water,
+     legend = FALSE,
+     lwd = 2,
+     main = "",
+     xlab = "Distance to Water")
+```
+
+### Lurking plot
+
+```{r}
+par(mfrow = c(2,2))
+lurk_ele<-lurking (fit_gam, DATA$Elevation ,type = "raw",cumulative = F,envelope = T,xlab = "Gradient", main="Elevation")
+lurk_forest<-lurking (fit_gam, DATA$Forest ,type = "raw",cumulative = F,envelope = T,xlab = "Gradient", main="Forest Cover")
+lurk_HFI<-lurking (fit_gam, DATA$HFI ,type = "raw",cumulative = F,envelope = T,xlab = "Gradient", main="Human Footprint Index")
+lurk_water<-lurking (fit_gam, DATA$Dist_Water ,type = "raw",cumulative = F,envelope = T,xlab = "Gradient", main="Distance to Water")
+```
+
+
+ 
+ 
