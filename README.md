@@ -13,4 +13,6 @@ In this repository, you will find the source code or our analysis in two formats
 
 The spatial covatiates can be download from: [BC Covariates](https://noonanm.github.io/DATA589/Datasets.htm)
 
+Finally, a comprehensive report with our findings can be found in the file "Data 589_Project_Report.pdf".
+
 [1] GBIF.org (13 April 2024) GBIF Occurrence Download https://doi.org/10.15468/dl.zb3e97 
